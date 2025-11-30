@@ -6,7 +6,7 @@ use opus::{Channels, Decoder, Encoder};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::slice;
-use tokio::net::UdpSocket;
+use tokio::net::{UdpSocket, lookup_host};
 
 use crate::implementations::pulseaudio::{PulseAudioConsumer, PulseAudioProducer};
 use rand::prelude::*;
@@ -20,6 +20,7 @@ const FRAME_SIZE: usize = 960; // for opus - 20ms at 48kHz. Per channel, so tota
 #[derive(Debug)]
 enum ErrorKind {
     InitializationError,
+    InitializationError2(String),
     WriteError(String),
     ReadError,
 }
@@ -61,15 +62,25 @@ struct NetworkConsumer {
 impl NetworkConsumer {
     async fn new(addr: &str) -> Result<Self, ErrorKind> {
         info!("Connecting to {}", addr);
-        let consumer = UdpSocket::bind("127.0.0.1:0")
+        let result = lookup_host(addr)
+            .await
+            .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
+        let addr = result
+            .into_iter()
+            .next()
+            .ok_or(ErrorKind::InitializationError)?;
+        debug!("Connecting to {}", addr);
+        let consumer = UdpSocket::bind("0.0.0.0:0")
             .await
             .map(|s| NetworkConsumer { socket: s })
-            .map_err(|_| ErrorKind::InitializationError)?;
+            .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
+        debug!("Socket bound to {}", consumer.socket.local_addr().unwrap());
         consumer
             .socket
             .connect(addr)
             .await
-            .map_err(|_| ErrorKind::InitializationError)?;
+            .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
+        debug!("Socket connected to {}", addr);
         Ok(consumer)
     }
 }
@@ -90,7 +101,7 @@ fn main() {
     rt.block_on(async {
         let mut server = false;
         let mut client = false;
-        let mut ip = "127.0.0.1:1234".to_string();
+        let mut ip = "kopatz.dev:1234".to_string();
         let mut args = std::env::args().skip(1).peekable();
 
         env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
@@ -143,8 +154,8 @@ fn help() {
 
 async fn receive_audio() {
     let mut audio_consumer = PulseAudioConsumer::new().unwrap();
-    let listener = UdpSocket::bind("127.0.0.1:1234").await.unwrap();
-    info!("Listening on 127.0.0.1:1234");
+    let listener = UdpSocket::bind("0.0.0.0:1234").await.unwrap();
+    info!("Listening on 0.0.0.0:1234");
     loop {
         let mut buf = [0u8; BUF_SIZE as usize];
         let (len, addr) = listener.recv_from(&mut buf).await.unwrap();
