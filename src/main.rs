@@ -57,9 +57,12 @@ impl Consumer for FileConsumer {
 }
 
 /// A network consumer that takes audio data and sends it over UDP
-#[derive(Clone)]
 struct NetworkClient {
     socket: Arc<UdpSocket>,
+    encoded_data: [u8; BUF_SIZE as usize],
+    encoder: Encoder,
+    hangover: usize,
+    hangover_limit: usize,
 }
 
 impl NetworkClient {
@@ -77,27 +80,54 @@ impl NetworkClient {
             .await
             .map(|s| NetworkClient {
                 socket: Arc::new(s),
+                encoded_data: [0u8; BUF_SIZE as usize],
+                encoder: opus_encoder(),
+                hangover: 0,
+                hangover_limit: 10, // number of consecutive silent frames to send before stopping
             })
             .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
-        debug!(
-            "Socket bound to {}",
-            consumer.socket.local_addr().unwrap()
-        );
+        debug!("Socket bound to {}", consumer.socket.local_addr().unwrap());
         consumer
             .socket
             .connect(addr)
             .await
             .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
         debug!("Socket connected to {}", addr);
+
         Ok(consumer)
     }
 }
 
 impl Consumer for NetworkClient {
     fn consume(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
+        let pcm: &[i16] =
+            unsafe { slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
+
+        let samples_needed = FRAME_SIZE * CHANNELS;
+        let pcm = &pcm[..samples_needed];
+        if is_silence(pcm, 600.0) {
+            if self.hangover == 0 {
+                return Ok(0);
+            }
+            self.hangover -= 1;
+        } else {
+            self.hangover = self.hangover_limit;
+        }
+        debug!("Acive audio detected, sending packet");
+        let n = self.encoder.encode(&pcm, &mut self.encoded_data).unwrap();
+
+        debug!(
+            "Read {} samples, data has {} samples, encoded to {} bytes,",
+            pcm.len(),
+            data.len() / 2,
+            n,
+        );
         // Note: This is a blocking call; in a real application, consider using async methods
-        match self.socket.try_send(data) {
-            Ok(bytes_sent) => Ok(bytes_sent),
+        match self.socket.try_send(&self.encoded_data[..n]) {
+            Ok(bytes_sent) => {
+                debug!("Sent {} bytes", bytes_sent);
+                Ok(bytes_sent)
+            },
             Err(e) => Err(ErrorKind::WriteError(e.to_string())),
         }
     }
@@ -142,11 +172,9 @@ fn main() {
         }
         if client {
             let mut network_client = NetworkClient::new(&ip).await.unwrap();
-            let client_clone = NetworkClient {
-                socket: network_client.socket.clone(),
-            };
+            let socket = network_client.socket.clone();
             tokio::spawn(async move { send_audio(&mut network_client).await });
-            receive_audio(client_clone.socket).await;
+            receive_audio(socket).await;
         } else if server {
             let listener = UdpSocket::bind("0.0.0.0:1234").await.unwrap();
             info!("Listening on 0.0.0.0:1234");
@@ -169,12 +197,22 @@ fn help() {
 
 async fn receive_audio(listener: Arc<UdpSocket>) {
     let mut audio_consumer = PulseAudioConsumer::new().unwrap();
+    let mut decoder = opus_decoder();
+    let mut encoded_data = [0u8; BUF_SIZE as usize];
+    let mut decoded_data = vec![0i16; FRAME_SIZE * CHANNELS];
     info!("Ready to receive audio");
     loop {
-        let mut buf = [0u8; BUF_SIZE as usize];
-        let (len, addr) = listener.recv_from(&mut buf).await.unwrap();
+        let (len, addr) = listener.recv_from(&mut encoded_data).await.unwrap();
         debug!("Received {} bytes from {}", len, addr);
-        match audio_consumer.consume(&buf[..len]) {
+        let b = decoder
+            .decode(&encoded_data[..len], &mut decoded_data, false)
+            .unwrap();
+        match audio_consumer.consume(unsafe {
+            slice::from_raw_parts(
+                decoded_data.as_ptr() as *const u8,
+                b * CHANNELS * std::mem::size_of::<i16>(),
+            )
+        }) {
             Ok(_) => {}
             Err(e) => {
                 error!("Error consuming data: {:?}", e);
@@ -190,12 +228,6 @@ async fn send_audio(consumer: &mut NetworkClient) {
     let mut audio_producer = PulseAudioProducer::new().unwrap();
     let consumers: &mut [&mut dyn Consumer] = &mut [consumer];
     let mut data = vec![0u8; BUF_SIZE as usize];
-    let mut encoded_data = [0u8; BUF_SIZE as usize];
-    let mut decoded_data = vec![0i16; FRAME_SIZE * CHANNELS];
-    let mut encoder = opus_encoder();
-    let mut decoder = opus_decoder();
-    // Get an RNG:
-    let mut rng = rand::rng();
     loop {
         match audio_producer.produce(&mut data) {
             Ok(_) => {}
@@ -205,38 +237,10 @@ async fn send_audio(consumer: &mut NetworkClient) {
             }
         }
 
-        let pcm: &[i16] =
-            unsafe { slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
-
-        let samples_needed = FRAME_SIZE * CHANNELS;
-        let pcm = &pcm[..samples_needed];
-        let n = encoder.encode(&pcm, &mut encoded_data).unwrap();
-        if (rng.random_range(0..100)) < 0 {
-            error!("Simulating packet loss");
-            continue;
-        }
-        let b = decoder
-            .decode(&encoded_data[..n], &mut decoded_data, false)
-            .unwrap();
-
-        debug!(
-            "Read {} samples, data has {} samples, encoded to {} bytes, decoded to {} samples",
-            pcm.len(),
-            data.len() / 2,
-            n,
-            b
-        );
-        consumers.iter_mut().for_each(|c| {
-            match c.consume(unsafe {
-                slice::from_raw_parts(
-                    decoded_data.as_ptr() as *const u8,
-                    b * CHANNELS * std::mem::size_of::<i16>(),
-                )
-            }) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error consuming data: {:?}", e);
-                }
+        consumers.iter_mut().for_each(|c| match c.consume(&data) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error consuming data: {:?}", e);
             }
         });
     }
@@ -247,4 +251,18 @@ fn opus_encoder() -> Encoder {
 }
 fn opus_decoder() -> Decoder {
     Decoder::new(SAMPLE_RATE, Channels::Stereo).unwrap()
+}
+
+fn is_silence(pcm: &[i16], threshold: f32) -> bool {
+    if pcm.is_empty() {
+        return true;
+    }
+
+    let mut sum = 0f64;
+    for &s in pcm {
+        sum += (s as f64) * (s as f64);
+    }
+
+    let rms = (sum / pcm.len() as f64).sqrt();
+    rms < threshold as f64
 }
