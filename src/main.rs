@@ -3,13 +3,15 @@ use libpulse_binding::def::BufferAttr;
 use libpulse_simple_binding as psimple;
 use opus::Application::Voip;
 use opus::{Channels, Decoder, Encoder};
-use psimple::Simple;
 use pulse::sample::{Format, Spec};
-use pulse::stream::Direction;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::slice;
 
+use crate::implementations::pulseaudio::{PulseAudioConsumer, PulseAudioProducer};
+use rand::prelude::*;
+
+mod implementations;
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS: usize = 2;
 const BUF_SIZE: u32 = 3840; // 20ms of stereo 48kHz 16-bit audio = 48000 samples/sec * 0.02 sec * 2 channels * 2 bytes/sample = 3840 bytes
@@ -17,8 +19,12 @@ const FRAME_SIZE: usize = 960; // for opus - 20ms at 48kHz. Per channel, so tota
 
 #[derive(Debug)]
 enum ErrorKind {
+    InitializationError,
     WriteError,
     ReadError,
+}
+trait AudioProducer {
+    fn produce(&mut self, data: &mut [u8]) -> Result<(), ErrorKind>;
 }
 
 trait Consumer {
@@ -38,10 +44,6 @@ impl FileConsumer {
     }
 }
 
-struct AudioConsumer {
-    endpoint: psimple::Simple,
-}
-
 impl Consumer for FileConsumer {
     fn consume(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
         match self.file.write(data) {
@@ -51,82 +53,54 @@ impl Consumer for FileConsumer {
     }
 }
 
-impl Consumer for AudioConsumer {
-    fn consume(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
-        match self.endpoint.write(data) {
-            Ok(_) => Ok(data.len()),
-            Err(_) => Err(ErrorKind::WriteError),
+//mod external;
+fn main() {
+    let mut client = false;
+    let mut server = true;
+    for arg in std::env::args() {
+        if arg == "--client" {
+            client = true;
         }
+        if arg == "--server" {
+            server = true;
+        }
+    }
+    if client && server {
+        eprintln!("Cannot be both client and server");
+        return;
+    }
+    if server {
+        send_audio();
+    } else if client {
+        receive_audio();
+    } else {
+        eprintln!("Must specify either --client or --server");
     }
 }
 
-//mod external;
-fn main() {
+fn receive_audio() {
+    let audio_consumer = PulseAudioConsumer::new().unwrap();
+}
+
+fn send_audio() {
     // Can be opened with audacity as raw file, signed 16 bit PCM, 44100 Hz, stereo
-    let mut file_consumer = FileConsumer::new("output.pcm").unwrap();
-    let spec = Spec {
-        format: Format::S16NE,
-        channels: CHANNELS as u8,
-        rate: SAMPLE_RATE,
-    };
-    // https://www.freedesktop.org/software/pulseaudio/doxygen/structpa__buffer__attr.html#abef20d3a6cab53f716846125353e56a4
-    let record_attr = BufferAttr {
-        maxlength: u32::MAX, // maximum length of the buffer
-        tlength: u32::MAX,   // playback-only: target length of the buffer
-        prebuf: u32::MAX,    // playback-only: prebuffering size
-        minreq: u32::MAX,    // minimum request size
-        fragsize: BUF_SIZE,  // record-only: fragment size
-    };
-    let playback_attr = BufferAttr {
-        maxlength: u32::MAX,   // maximum length of the buffer
-        tlength: BUF_SIZE * 3, // playback-only: target length of the buffer
-        prebuf: BUF_SIZE * 2,  // playback-only: prebuffering size
-        minreq: BUF_SIZE,      // minimum request size
-        fragsize: u32::MAX,    // record-only: fragment size
-    };
-    assert!(spec.is_valid());
+    //let mut file_consumer = FileConsumer::new("output.pcm").unwrap();
+    //let mut audio_consumer = PulseAudioConsumer::new().unwrap();
 
-    let rec = Simple::new(
-        None,                 // Use the default server
-        "Rustaudio Recorder", // Our application’s name
-        Direction::Record,    // We want a recording stream
-        None,                 // Use the default device
-        "Record",             // Description of our stream
-        &spec,                // Our sample format
-        None,                 // Use default channel map
-        Some(&record_attr),   // Use default buffering attributes
-    )
-    .unwrap();
-    let out = Simple::new(
-        None,
-        "Rustaudio Player",
-        Direction::Playback,
-        None,
-        "Play",
-        &spec,
-        None,
-        Some(&playback_attr),
-    )
-    .unwrap();
-    let mut audio_consumer = AudioConsumer { endpoint: out };
-    let consumers: &mut [&mut dyn Consumer] = &mut [&mut audio_consumer];
-
+    let mut audio_producer = PulseAudioProducer::new().unwrap();
+    let consumers: &mut [&mut dyn Consumer] = &mut [];
     let mut data = vec![0u8; BUF_SIZE as usize];
     let mut encoded_data = [0u8; BUF_SIZE as usize];
     let mut decoded_data = vec![0i16; FRAME_SIZE * CHANNELS];
     let mut encoder = opus_encoder();
     let mut decoder = opus_decoder();
+    // Get an RNG:
+    let mut rng = rand::rng();
     loop {
-        match rec.get_latency() {
-            Ok(latency) => {
-                println!("Latency: {} ms", latency.as_millis());
-            }
-            Err(e) => {}
-        }
-        match rec.read(&mut data) {
+        match audio_producer.produce(&mut data) {
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("Error reading from stream: {}", e);
+            Err(_) => {
+                eprintln!("Error reading from stream");
                 break;
             }
         }
@@ -137,6 +111,10 @@ fn main() {
         let samples_needed = FRAME_SIZE * CHANNELS;
         let pcm = &pcm[..samples_needed];
         let n = encoder.encode(&pcm, &mut encoded_data).unwrap();
+        if (rng.random_range(0..100)) < 0 {
+            eprintln!("Simulating packet loss");
+            continue;
+        }
         let b = decoder
             .decode(&encoded_data[..n], &mut decoded_data, false)
             .unwrap();
