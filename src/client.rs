@@ -2,8 +2,8 @@ use log::{debug, error, info, warn};
 use opus::Application::Voip;
 use opus::{Channels, Decoder, Encoder};
 use std::slice;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, mpsc};
 use tokio::net::{UdpSocket, lookup_host};
 
 use crate::implementations::pulseaudio::{PulseAudioConsumer, PulseAudioProducer};
@@ -19,10 +19,11 @@ pub struct NetworkClient {
     encoder: Encoder,
     hangover: usize,
     hangover_limit: usize,
+    muted: bool,
 
     // communication with TUI
     tx: Option<Sender<client::TuiMessage>>,
-    rx: Option<Receiver<client::TuiMessage>>,
+    rx_send_audio: Option<Receiver<client::TuiMessage>>,
 }
 pub enum TuiMessage {
     Connect,
@@ -32,12 +33,22 @@ pub enum TuiMessage {
     TransmitAudio(bool),
     Exit,
 }
+fn receive_tui_message(rx: &Option<Receiver<client::TuiMessage>>) -> Option<client::TuiMessage> {
+    if let Some(rx) = rx {
+        match rx.try_recv() {
+            Ok(msg) => Some(msg),
+            Err(_) => None,
+        }
+    } else {
+        None
+    }
+}
 
 impl NetworkClient {
     pub async fn new(
         addr: &str,
         tx: Option<Sender<client::TuiMessage>>,
-        rx: Option<Receiver<client::TuiMessage>>,
+        rx_send_audio: Option<Receiver<client::TuiMessage>>,
     ) -> Result<Self, ErrorKind> {
         info!("Connecting to {}", addr);
         let result = lookup_host(addr)
@@ -56,8 +67,9 @@ impl NetworkClient {
                 encoder: opus_encoder(),
                 hangover: 0,
                 hangover_limit: 10, // number of consecutive silent frames to send before stopping
-                tx,
-                rx,
+                muted: false,
+                tx: tx,
+                rx_send_audio: rx_send_audio,
             })
             .map_err(|e| ErrorKind::InitializationError2(e.to_string()))?;
         debug!("Socket bound to {}", consumer.socket.local_addr().unwrap());
@@ -74,6 +86,17 @@ impl NetworkClient {
         Ok(consumer)
     }
 
+    pub async fn start(mut self, is_tui: bool, rx_receive_audio: Option<Receiver<client::TuiMessage>>) -> () {
+        let socket = self.socket.clone();
+
+        tokio::spawn(async move { client::send_audio(&mut self).await });
+        if is_tui {
+            tokio::spawn(async move { client::receive_audio(socket, rx_receive_audio).await });
+        } else {
+            client::receive_audio(socket, rx_receive_audio).await;
+        }
+    }
+
     fn send_tui_message(&self, message: client::TuiMessage) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(message);
@@ -83,6 +106,17 @@ impl NetworkClient {
 
 impl Consumer for NetworkClient {
     fn consume(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
+        match receive_tui_message(&self.rx_send_audio) {
+            Some(client::TuiMessage::ToggleMute) => {
+                self.muted = !self.muted;
+            }
+            _ => {}
+        }
+        if self.muted {
+            debug!("Client is muted, not sending audio");
+            self.send_tui_message(client::TuiMessage::TransmitAudio(false));
+            return Ok(0);
+        }
         let pcm: &[i16] =
             unsafe { slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
 
@@ -121,13 +155,23 @@ impl Consumer for NetworkClient {
     }
 }
 
-pub async fn receive_audio(listener: Arc<UdpSocket>) {
+pub async fn receive_audio(
+    listener: Arc<UdpSocket>,
+    rx_receive_audio: Option<Receiver<client::TuiMessage>>,
+) {
     let mut audio_consumer = PulseAudioConsumer::new().unwrap();
     let mut decoder = opus_decoder();
     let mut data = [0u8; BUF_SIZE as usize + 1]; // MSG type byte
     let mut decoded_data = vec![0i16; FRAME_SIZE * CHANNELS];
+    let mut deafened = false;
     info!("Ready to receive audio");
     loop {
+        match receive_tui_message(&rx_receive_audio) {
+            Some(client::TuiMessage::ToggleDeafen) => {
+                deafened = !deafened;
+            }
+            _ => {}
+        }
         let (len, addr) = listener.recv_from(&mut data).await.unwrap();
 
         let msg = decode_message(&data[..len]);

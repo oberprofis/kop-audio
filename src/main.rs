@@ -49,16 +49,27 @@ fn main() {
     rt.block_on(async {
         let mut server = false;
         let mut client = false;
-        let mut tui = true;
+        let mut tui = false;
         let mut ip = "kopatz.dev:1234".to_string();
         let mut args = std::env::args().skip(1).peekable();
-        let (tx_tui, rx_cl): (Sender<client::TuiMessage>, Receiver<client::TuiMessage>) = mpsc::channel();
-        let (tx_cl, rx_tui): (Sender<client::TuiMessage>, Receiver<client::TuiMessage>) = mpsc::channel();
+        let (tx_tui, rx_tui): (Sender<client::TuiMessage>, Receiver<client::TuiMessage>) =
+            mpsc::channel();
+        let (tx_send_audio, rx_send_audio): (
+            Sender<client::TuiMessage>,
+            Receiver<client::TuiMessage>,
+        ) = mpsc::channel();
+        let (tx_receive_audio, rx_receive_audio): (
+            Sender<client::TuiMessage>,
+            Receiver<client::TuiMessage>,
+        ) = mpsc::channel();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--server" => server = true,
-                "--client" => client = true,
+                "--client" => {
+                    client = true;
+                    tui = true;
+                }
                 "--no-tui" => tui = false,
                 "--ip" => {
                     if let Some(val) = args.next() {
@@ -76,6 +87,14 @@ fn main() {
                 }
             }
         }
+
+        if server && client {
+            eprintln!("Cannot be both client and server");
+            return;
+        } else if !server && !client {
+            client = true;
+            tui = true;
+        }
         if (!tui) {
             env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
                 .init();
@@ -84,29 +103,22 @@ fn main() {
                 .filter_level(log::LevelFilter::Off)
                 .init();
         }
-        if server && client {
-            eprintln!("Cannot be both client and server");
-            return;
-        } else if !server && !client {
-            client = true;
-        }
         if client {
             //todo: some way to mute and deafen
             let state = Arc::new(ClientState::default());
 
             let mut network_client;
-            if (tui) {
-                network_client = NetworkClient::new(&ip, Some(tx_cl), Some(rx_cl)).await.unwrap();
+            if tui {
+                network_client = NetworkClient::new(&ip, Some(tx_tui), Some(rx_send_audio))
+                    .await
+                    .unwrap();
+                network_client.start(tui, Some(rx_receive_audio)).await;
             } else {
                 network_client = NetworkClient::new(&ip, None, None).await.unwrap();
+                network_client.start(tui, None).await;
             }
-            let socket = network_client.socket.clone();
-            tokio::spawn(async move { client::send_audio(&mut network_client).await });
             if tui {
-                tokio::spawn(async { client::receive_audio(socket).await });
-                tui::App::new(tx_tui, rx_tui);
-            } else {
-                client::receive_audio(socket).await;
+                tui::App::new(rx_tui, tx_send_audio, tx_receive_audio);
             }
         } else if server {
             let listener = UdpSocket::bind("0.0.0.0:1234").await.unwrap();

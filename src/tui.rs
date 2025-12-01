@@ -13,7 +13,8 @@ use std::{
     sync::{
         Arc,
         mpsc::{Receiver, Sender},
-    }, time::Duration,
+    },
+    time::Duration,
 };
 
 use crate::{ClientState, client};
@@ -21,16 +22,22 @@ use crate::{ClientState, client};
 #[derive(Debug)]
 pub struct App {
     client_state: ClientState,
-    tx: Sender<client::TuiMessage>,
     rx: Receiver<client::TuiMessage>,
+    tx_send_audio: Sender<client::TuiMessage>,
+    tx_receive_audio: Sender<client::TuiMessage>,
 }
 
 impl App {
-    pub fn new(tx: Sender<client::TuiMessage>, rx: Receiver<client::TuiMessage>) {
+    pub fn new(
+        rx: Receiver<client::TuiMessage>,
+        tx_send_audio: Sender<client::TuiMessage>,
+        tx_receive_audio: Sender<client::TuiMessage>,
+    ) {
         let mut app = App {
             client_state: ClientState::default(),
-            tx,
             rx,
+            tx_send_audio,
+            tx_receive_audio,
         };
         let terminal = ratatui::init();
         let result = app.run(terminal);
@@ -78,15 +85,15 @@ impl App {
                 match key_event.code {
                     event::KeyCode::Char('d') | event::KeyCode::Char('D') => {
                         self.client_state.deafen = !self.client_state.deafen;
-                        let _ = self.tx.send(client::TuiMessage::ToggleDeafen);
+                        //let _ = self.tx.send(client::TuiMessage::ToggleDeafen);
                     }
                     event::KeyCode::Char('m') | event::KeyCode::Char('M') => {
                         self.client_state.mute = !self.client_state.mute;
-                        let _ = self.tx.send(client::TuiMessage::ToggleMute);
+                        let _ = self.tx_send_audio.send(client::TuiMessage::ToggleMute);
                     }
                     event::KeyCode::Char('q') | event::KeyCode::Char('Q') => {
                         self.client_state.exit = true;
-                        let _ = self.tx.send(client::TuiMessage::Exit);
+                        //let _ = self.tx.send(client::TuiMessage::Exit);
                     }
                     _ => {}
                 }
