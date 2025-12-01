@@ -4,12 +4,15 @@ use opus::{Channels, Decoder, Encoder};
 use std::slice;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::timeout;
 
+use crate::channel_util::send_tui_message;
 use crate::implementations::pulseaudio::{PulseAudioConsumer, PulseAudioProducer};
 use crate::server::{Message, MessageType, decode_message, encode_message};
 use crate::{
-    AudioProducer, BUF_SIZE, CHANNELS, Consumer, ErrorKind, FRAME_SIZE, SAMPLE_RATE, client,
+    AudioProducer, BUF_SIZE, CHANNELS, Consumer, ErrorKind, FRAME_SIZE, SAMPLE_RATE, channel_util, client
 };
 
 /// A network consumer that takes audio data and sends it over UDP
@@ -81,12 +84,42 @@ impl NetworkClient {
         let _ = consumer
             .socket
             .try_send(&encode_message(MessageType::Hello, &[]));
+
+        let mut buf = [0u8; BUF_SIZE as usize];
+        match timeout(Duration::from_secs(1), consumer.socket.recv(&mut buf)).await {
+            Ok(Ok(len)) => {
+                let msg = decode_message(&buf[..len]);
+                match msg {
+                    Message::Hello(_) => {
+                        info!("Connected to server at {}", addr);
+                        send_tui_message(TuiMessage::Connect, &consumer.tx);
+                    }
+                    _ => {
+                        return Err(ErrorKind::InitializationError2(
+                            "Did not receive Hello from server".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(ErrorKind::InitializationError2(e.to_string()));
+            }
+            Err(_) => {
+                return Err(ErrorKind::InitializationError2(
+                    "Timeout waiting for Hello from server".to_string(),
+                ));
+            }
+        }
         debug!("Socket connected to {}", addr);
 
         Ok(consumer)
     }
 
-    pub async fn start(mut self, is_tui: bool, rx_receive_audio: Option<Receiver<client::TuiMessage>>) -> () {
+    pub async fn start(
+        mut self,
+        is_tui: bool,
+        rx_receive_audio: Option<Receiver<client::TuiMessage>>,
+    ) -> () {
         let socket = self.socket.clone();
 
         tokio::spawn(async move { client::send_audio(&mut self).await });
@@ -94,12 +127,6 @@ impl NetworkClient {
             tokio::spawn(async move { client::receive_audio(socket, rx_receive_audio).await });
         } else {
             client::receive_audio(socket, rx_receive_audio).await;
-        }
-    }
-
-    fn send_tui_message(&self, message: client::TuiMessage) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(message);
         }
     }
 }
@@ -114,7 +141,7 @@ impl Consumer for NetworkClient {
         }
         if self.muted {
             debug!("Client is muted, not sending audio");
-            self.send_tui_message(client::TuiMessage::TransmitAudio(false));
+            send_tui_message(client::TuiMessage::TransmitAudio(false), &self.tx);
             return Ok(0);
         }
         let pcm: &[i16] =
@@ -124,7 +151,7 @@ impl Consumer for NetworkClient {
         let pcm = &pcm[..samples_needed];
         if is_silence(pcm, 200.0) {
             if self.hangover == 0 {
-                self.send_tui_message(client::TuiMessage::TransmitAudio(false));
+                send_tui_message(client::TuiMessage::TransmitAudio(false), &self.tx);
                 return Ok(0);
             }
             self.hangover -= 1;
@@ -141,7 +168,7 @@ impl Consumer for NetworkClient {
             n,
         );
         // Note: This is a blocking call; in a real application, consider using async methods
-        self.send_tui_message(client::TuiMessage::TransmitAudio(true));
+        send_tui_message(client::TuiMessage::TransmitAudio(true), &self.tx);
         match self
             .socket
             .try_send(&encode_message(MessageType::Audio, &self.encoded_data[..n]))

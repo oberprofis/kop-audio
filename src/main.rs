@@ -4,18 +4,20 @@ use std::sync::{Arc, mpsc};
 use libpulse_binding as pulse;
 use libpulse_simple_binding as psimple;
 use log::info;
-use tokio::net::{UdpSocket, lookup_host};
+use tokio::net::{UdpSocket};
 
-use crate::client::{NetworkClient, receive_audio, send_audio};
-use crate::server::server_loop;
+use crate::client::{NetworkClient};
 
 mod client;
 mod implementations;
 mod server;
 mod tui;
+mod channel_util;
+
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS: usize = 2;
 const BUF_SIZE: u32 = 3840; // 20ms of stereo 48kHz 16-bit audio = 48000 samples/sec * 0.02 sec * 2 channels * 2 bytes/sample = 3840 bytes
+const MSG_SIZE: u32 = BUF_SIZE + 1;
 const FRAME_SIZE: usize = 960; // for opus - 20ms at 48kHz. Per channel, so total samples = FRAME_SIZE * CHANNELS = 1920
 
 #[derive(Debug)]

@@ -75,7 +75,9 @@ pub async fn server_loop(listener: UdpSocket) {
             }
             Message::Hello(text) => {
                 info!("Received hello from {}: {}", addr, text);
-                // Handle hello
+                let _ = listener.send_to(&buf[..len], addr).await;
+                let _ = listener.send_to(&buf[..len], addr).await;
+                let _ = listener.send_to(&buf[..len], addr).await;
             }
             Message::Bye => {
                 info!("Received bye from {}", addr);

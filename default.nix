@@ -21,7 +21,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     pkg-config
   ];
 
-  cargoHash = "sha256-S0vjZFqzCzY+dy/ds8ns0Qt6utE9kYPq19Lh5t02Lek=";
+  cargoHash = "sha256-NYzy58PR7SMY1nlAWiESraPod2Wam1KVtgr16q9jm60=";
 
   meta = {
     description = "A voice chat application written in Rust";
