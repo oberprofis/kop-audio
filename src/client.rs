@@ -24,7 +24,7 @@ pub enum ClientMessage {
     ToggleMute,
     ToggleDeafen,
     Audio(Vec<u8>),
-    RecvAudio(Vec<u8>),
+    RecvAudio(Vec<u8>, std::net::SocketAddr),
     TransmitAudio(bool),
     NewClient(std::net::SocketAddr),
     DeleteClient(std::net::SocketAddr),
@@ -107,8 +107,8 @@ pub async fn receive_udp(
         let msg = decode_message(&data[..len]);
         debug!("Received message of type {:?}", msg);
         match msg {
-            Message::Audio(encoded_data) => {
-                let _ = tx.send(ClientMessage::RecvAudio(encoded_data));
+            Message::AudioFrom(addr, encoded_data) => {
+                let _ = tx.send(ClientMessage::RecvAudio(encoded_data, addr));
             }
             Message::NewClient(addr) => {
                 let _ = tx.send(ClientMessage::NewClient(addr));

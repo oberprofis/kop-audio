@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 #[derive(Encode, Decode, PartialEq, Debug)]
 pub enum Message {
     Audio(Vec<u8>), // decoded audio packet
+    AudioFrom(std::net::SocketAddr, Vec<u8>),
     Ping,
     Hello(std::net::SocketAddr), // maybe UTF-8
     NewClient(std::net::SocketAddr),
@@ -73,9 +74,11 @@ pub async fn server_loop(socket: UdpSocket) {
                     data.len(),
                     addr
                 );
+                let msg = Message::AudioFrom(addr, data);
+                let buf = encode_message(&msg);
                 for client in &clients {
                     if client.addr != addr {
-                        match socket.send_to(&buf[..len], client.addr).await {
+                        match socket.send_to(&buf, client.addr).await {
                             Ok(_) => println!("Forwarded audio packet to {}", client.addr),
                             Err(e) => error!("Error forwarding audio to {}: {:?}", client.addr, e),
                         }

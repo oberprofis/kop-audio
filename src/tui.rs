@@ -11,6 +11,7 @@ use ratatui::{
 };
 use std::{
     io::Result,
+    net,
     sync::{
         Arc,
         mpsc::{Receiver, Sender},
@@ -18,7 +19,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{ClientState, client};
+use crate::{
+    ClientState,
+    client::{self, ClientMessage},
+};
 
 #[derive(Debug)]
 pub struct App {
@@ -31,15 +35,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        rx: Receiver<client::ClientMessage>,
-        tx_coordinator: Sender<client::ClientMessage>,
-    ) {
+    pub fn new(rx: Receiver<client::ClientMessage>, tx_coordinator: Sender<client::ClientMessage>) {
         let mut app = App {
             client_state: ClientState::default(),
             rx,
             tx_coordinator,
-            main_widget: UserListWidget { users: vec![] }
+            main_widget: UserListWidget { users: vec![] },
         };
         let terminal = ratatui::init();
         let result = app.run(terminal);
@@ -55,6 +56,9 @@ impl App {
             should_draw = self.handle_tui_messages();
             if let Ok(true) = event::poll(Duration::from_millis(100)) {
                 self.handle_event(event::read()?);
+                should_draw = true;
+            }
+            if set_speaking_flags(&mut self.main_widget.users) {
                 should_draw = true;
             }
         }
@@ -85,11 +89,28 @@ impl App {
                 client::ClientMessage::TransmitAudio(sending) => {
                     self.client_state.sending_audio = sending;
                 }
-                client::ClientMessage::NewClient(addr)=> {
-                    self.main_widget.users.push(addr.to_string());
+                client::ClientMessage::NewClient(addr) => {
+                    self.main_widget.users.push(UserListEntry {
+                        addr: addr.to_string(),
+                        is_speaking: false,
+                        last_spoke: None,
+                    });
                 }
-                client::ClientMessage::DeleteClient(addr)=> {
-                    self.main_widget.users.retain(|user| user != &addr.to_string());
+                client::ClientMessage::DeleteClient(addr) => {
+                    self.main_widget
+                        .users
+                        .retain(|user| user.addr != addr.to_string());
+                }
+                ClientMessage::RecvAudio(_, addr) => {
+                    if let Some(user) = self
+                        .main_widget
+                        .users
+                        .iter_mut()
+                        .find(|user| user.addr == addr.to_string())
+                    {
+                        user.is_speaking = true;
+                        user.last_spoke = Some(std::time::Instant::now());
+                    }
                 }
                 _ => {}
             }
@@ -106,7 +127,9 @@ impl App {
                 match key_event.code {
                     event::KeyCode::Char('d') | event::KeyCode::Char('D') => {
                         self.client_state.deafen = !self.client_state.deafen;
-                        let _ = self.tx_coordinator.send(client::ClientMessage::ToggleDeafen);
+                        let _ = self
+                            .tx_coordinator
+                            .send(client::ClientMessage::ToggleDeafen);
                     }
                     event::KeyCode::Char('m') | event::KeyCode::Char('M') => {
                         self.client_state.mute = !self.client_state.mute;
@@ -123,6 +146,22 @@ impl App {
             _ => {}
         };
     }
+}
+
+fn set_speaking_flags(users: &mut Vec<UserListEntry>) -> bool {
+    let mut updated = false;
+    let now = std::time::Instant::now();
+    for user in users.iter_mut() {
+        if user.is_speaking {
+            if let Some(last_spoke) = user.last_spoke {
+                if now.duration_since(last_spoke) > Duration::from_millis(500) {
+                    user.is_speaking = false;
+                    updated = true;
+                }
+            }
+        }
+    }
+    updated
 }
 
 impl Widget for &App {
@@ -180,19 +219,30 @@ impl Widget for &App {
 
 #[derive(Debug)]
 struct UserListWidget {
-    users: Vec<String>,
+    users: Vec<UserListEntry>,
+}
+
+#[derive(Debug)]
+struct UserListEntry {
+    addr: String,
+    is_speaking: bool,
+    last_spoke: Option<std::time::Instant>,
 }
 
 impl Widget for &UserListWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::bordered()
-            .title("Users")
-            .border_set(border::THICK);
+        let block = Block::bordered().title("Users").border_set(border::THICK);
         let inner_area = block.inner(area);
         let user_lines: Vec<Line> = self
             .users
             .iter()
-            .map(|user| Line::from(user.as_str()))
+            .map(|user| {
+                if user.is_speaking {
+                    Line::from(user.addr.as_str().green())
+                } else {
+                    Line::from(user.addr.as_str())
+                }
+            })
             .collect();
         let paragraph = Paragraph::new(Text::from(user_lines));
         block.render(area, buf);

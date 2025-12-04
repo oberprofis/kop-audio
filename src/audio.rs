@@ -1,6 +1,8 @@
 use std::{
     slice,
-    sync::mpsc::{Receiver, Sender}, thread::sleep, time::Duration,
+    sync::mpsc::{Receiver, Sender},
+    thread::sleep,
+    time::Duration,
 };
 
 use log::{debug, error};
@@ -13,7 +15,11 @@ use crate::{
 };
 use opus::Application::Voip;
 
-pub fn record_audio(tx: Sender<ClientMessage>, producer: &mut PulseAudioProducer, rx: Receiver<ClientMessage>) {
+pub fn record_audio(
+    tx: Sender<ClientMessage>,
+    producer: &mut PulseAudioProducer,
+    rx: Receiver<ClientMessage>,
+) {
     let mut data = vec![0u8; BUF_SIZE as usize];
     let mut encoded_data = [0u8; BUF_SIZE as usize];
     let mut encoder = opus_encoder();
@@ -28,16 +34,16 @@ pub fn record_audio(tx: Sender<ClientMessage>, producer: &mut PulseAudioProducer
             }
             _ => {}
         }
-        if muted {
-            sleep(Duration::from_millis(20));
-            continue;
-        }
         match producer.produce(&mut data) {
             Ok(_) => {}
             Err(_) => {
                 error!("Error reading from stream");
                 break;
             }
+        }
+        if muted {
+            sleep(Duration::from_millis(20));
+            continue;
         }
         let pcm: &[i16] =
             unsafe { slice::from_raw_parts(data.as_ptr() as *const i16, data.len() / 2) };
@@ -73,7 +79,7 @@ pub fn play_audio(rx: Receiver<ClientMessage>, consumer: &mut PulseAudioConsumer
     let mut deafened = false;
     for msg in rx.iter() {
         match msg {
-            ClientMessage::RecvAudio(audio) => {
+            ClientMessage::RecvAudio(audio, _) => {
                 if deafened {
                     sleep(Duration::from_millis(20));
                     continue;
